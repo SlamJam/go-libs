@@ -138,7 +138,7 @@ func (w *workerpool[T]) tryStartWorker() bool {
 				}
 
 				// var err error
-				if panicObj := xgo.PanicCatcher(func() { w.f(w.ctx, item) }); panicObj != nil {
+				if panicObj := xgo.CatchPanic(func() { w.f(w.ctx, item) }); panicObj != nil {
 					w.Panics <- Panic[T]{Item: item, Panic: panicObj}
 				}
 

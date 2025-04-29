@@ -127,7 +127,7 @@ func (c *actor) Start(ctx context.Context) (result bool) {
 
 			close(c.started)
 
-			c.haltError = xgo.PanicCatcherErr(func() error {
+			c.haltError = xgo.CatchPanicInErr(func() error {
 				return errors.WithStack(c.main(lctx))
 			})
 

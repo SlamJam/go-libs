@@ -8,13 +8,13 @@ type PanicError struct {
 	Payload any
 }
 
-func (e *PanicError) Error() string {
+func (e PanicError) Error() string {
 	return fmt.Sprintf("panic was raised with payload: %+v", e.Payload)
 }
 
 var _ error = &PanicError{}
 
-func PanicCatcher(f func()) (err *PanicError) {
+func CatchPanic(f func()) (err *PanicError) {
 	defer func() {
 		if p := recover(); p != nil {
 			err = &PanicError{Payload: p}
@@ -26,35 +26,42 @@ func PanicCatcher(f func()) (err *PanicError) {
 	return nil
 }
 
-func PanicCatcherErr(f func() error) (err error) {
+func CatchPanicInErr(f func() error) (err error) {
 	defer func() {
 		if p := recover(); p != nil {
-			err = &PanicError{Payload: p}
+			err = PanicError{Payload: p}
 		}
 	}()
 
 	return f()
 }
 
-// func GoRecover(f func(), onPanic func(any)) {
-// 	go func() {
-// 		p := PanicCatcher(f)
-// 		onPanic(p)
-// 	}()
-// }
+func GoRecover(f func()) <-chan PanicError {
+	out := make(chan PanicError, 1)
 
-func GoRecoverForever(f func()) <-chan any {
-	out := make(chan any)
+	go func() {
+		defer close(out)
+		p := CatchPanic(f)
+		if p != nil {
+			out <- *p
+		}
+	}()
+
+	return out
+}
+
+func GoRecoverForever(f func()) <-chan PanicError {
+	out := make(chan PanicError)
 
 	go func() {
 		defer close(out)
 		for {
-			p := PanicCatcher(f)
+			p := CatchPanic(f)
 			if p == nil {
 				break
 			}
 
-			out <- p
+			out <- *p
 		}
 	}()
 
