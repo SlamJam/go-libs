@@ -1,26 +1,43 @@
-package component
+package actors
 
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/SlamJam/go-libs/options"
+	"github.com/SlamJam/go-libs/xgo"
+	"github.com/SlamJam/go-libs/xsync"
 	"github.com/pkg/errors"
 )
 
 var (
-	ErrComponentIsNil        = errors.New("component is nil")
-	ErrComponentIsNotRunning = errors.New("component is not running")
+	ErrActorIsNil        = errors.New("actor is nil")
+	ErrActorIsNotRunning = errors.New("actor is not running")
 )
 
-type compOptions struct {
+type actorOptions struct {
 	onInterrupt func(context.Context) error
 	onHalt      func(context.Context, error)
 }
 
+type PanicHandler func(any)
+
+var globalPanicHandler xsync.Value[PanicHandler]
+
+func SetGlobalPanicHandler(h PanicHandler) {
+	globalPanicHandler.Store(h)
+}
+
+func callGlobalPanicHandler(p any) {
+	if h, ok := globalPanicHandler.Load(); ok {
+		h(p)
+	}
+}
+
 // Жизненный цикл:
 // Создан -> Запущен -> [Прерван] -> Остановлен/Завершён
-type Component interface {
+type Actor interface {
 	Start(ctx context.Context) (result bool)
 	Interrupt(ctx context.Context) (err error)
 
@@ -35,38 +52,40 @@ type Component interface {
 	Error() error
 }
 
-type component struct {
+type actor struct {
 	inited bool
 
 	startOnce  *sync.Once
 	cancelOnce *sync.Once
-	cancelFunc context.CancelFunc
+	cancelFunc atomic.Pointer[context.CancelFunc]
 	done       chan struct{}
 	started    chan struct{}
 	haltError  error
 
 	main func(context.Context) error
-	opts compOptions
+	opts actorOptions
 }
 
-type Opt = options.Opt[compOptions]
+type Opt = options.Opt[actorOptions]
 
 func WithOnInterrupt(f func(context.Context) error) Opt {
-	return func(o compOptions) compOptions {
+	return func(o *actorOptions) {
 		o.onInterrupt = f
-		return o
 	}
 }
 
 func WithOnHalt(f func(context.Context, error)) Opt {
-	return func(o compOptions) compOptions {
+	return func(o *actorOptions) {
 		o.onHalt = f
-		return o
 	}
 }
 
-func NewComponent(main func(context.Context) error, opts ...Opt) Component {
-	c := &component{
+func NewActor(main func(context.Context) error, opts ...Opt) Actor {
+	return newActor(main, opts...)
+}
+
+func newActor(main func(context.Context) error, opts ...Opt) *actor {
+	c := &actor{
 		inited: true,
 
 		startOnce:  &sync.Once{},
@@ -77,42 +96,40 @@ func NewComponent(main func(context.Context) error, opts ...Opt) Component {
 		main: main,
 	}
 
-	for _, opt := range opts {
-		c.opts = opt(c.opts)
-	}
-
-	options.ApplyOptsInto(&c.opts, opts...)
+	options.ApplyInto(&c.opts, opts...)
 
 	return c
 }
 
-func (c *component) mustInitialized() {
+func (c *actor) mustInitialized() {
 	if c == nil {
-		panic("component is nil")
+		panic("actor is nil")
 	}
 
 	if !c.inited {
-		panic("component is not initialized")
+		panic("actor is not initialized. Use .Actor = actors.NewActor(...)")
 	}
 }
 
-func (c *component) Start(ctx context.Context) (result bool) {
+func (c *actor) Start(ctx context.Context) (result bool) {
 	c.mustInitialized()
 
 	c.startOnce.Do(func() {
 		go func() {
 			lctx, cancel := context.WithCancel(ctx)
-			c.cancelFunc = cancel
+			c.cancelFunc.Store(&cancel)
 
 			defer func() {
 				cancel()
-				c.cancelFunc = nil
+				c.cancelFunc.Store(nil)
 				close(c.done)
 			}()
 
 			close(c.started)
 
-			c.haltError = errors.WithStack(c.main(lctx))
+			c.haltError = xgo.PanicCatcherErr(func() error {
+				return errors.WithStack(c.main(lctx))
+			})
 
 			if hndl := c.opts.onHalt; hndl != nil {
 				hndl(lctx, c.haltError)
@@ -125,19 +142,19 @@ func (c *component) Start(ctx context.Context) (result bool) {
 	return result
 }
 
-func (c *component) Interrupt(ctx context.Context) (err error) {
+func (c *actor) Interrupt(ctx context.Context) (err error) {
 	if c == nil {
-		return ErrComponentIsNil
+		return ErrActorIsNil
 	}
 
 	c.mustInitialized()
 
-	if cancel := c.cancelFunc; cancel == nil {
-		err = ErrComponentIsNotRunning
+	if cancel := c.cancelFunc.Load(); cancel == nil {
+		err = ErrActorIsNotRunning
 	} else {
 		c.cancelOnce.Do(func() {
-			cancel()
-			c.cancelFunc = nil
+			(*cancel)()
+			c.cancelFunc.Store(nil)
 
 			if hndl := c.opts.onInterrupt; hndl != nil {
 				err = hndl(ctx)
@@ -148,11 +165,11 @@ func (c *component) Interrupt(ctx context.Context) (err error) {
 	return err
 }
 
-func (c *component) IsInterrupted() bool {
-	return c.cancelFunc == nil
+func (c *actor) IsInterrupted() bool {
+	return c.cancelFunc.Load() == nil
 }
 
-func (c *component) IsHalted() bool {
+func (c *actor) IsHalted() bool {
 	c.mustInitialized()
 
 	select {
@@ -163,7 +180,7 @@ func (c *component) IsHalted() bool {
 	}
 }
 
-func (c *component) IsStarted() bool {
+func (c *actor) IsStarted() bool {
 	c.mustInitialized()
 
 	select {
@@ -174,13 +191,13 @@ func (c *component) IsStarted() bool {
 	}
 }
 
-func (c *component) IsRunning() bool {
+func (c *actor) IsRunning() bool {
 	c.mustInitialized()
 
 	return c.IsStarted() && !c.IsInterrupted()
 }
 
-func (c *component) WaitUntilStarted(ctx context.Context) error {
+func (c *actor) WaitUntilStarted(ctx context.Context) error {
 	c.mustInitialized()
 
 	select {
@@ -191,7 +208,7 @@ func (c *component) WaitUntilStarted(ctx context.Context) error {
 	}
 }
 
-func (c *component) WaitUntilHalted(ctx context.Context) error {
+func (c *actor) WaitUntilHalted(ctx context.Context) error {
 	c.mustInitialized()
 
 	select {
@@ -202,6 +219,6 @@ func (c *component) WaitUntilHalted(ctx context.Context) error {
 	}
 }
 
-func (c *component) Error() error {
+func (c *actor) Error() error {
 	return c.haltError
 }

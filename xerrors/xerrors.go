@@ -1,4 +1,4 @@
-package errtools
+package exerrors
 
 import "github.com/pkg/errors"
 

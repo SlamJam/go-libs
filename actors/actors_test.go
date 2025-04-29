@@ -1,15 +1,15 @@
-package component_test
+package actors_test
 
 import (
 	"context"
 	"fmt"
 	"testing"
 
-	"github.com/SlamJam/go-libs/component"
+	"github.com/SlamJam/go-libs/actors"
 	"github.com/stretchr/testify/assert"
 )
 
-func TestComponentInterruption(t *testing.T) {
+func TestActorInterruption(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -18,7 +18,7 @@ func TestComponentInterruption(t *testing.T) {
 	var err error
 	done := make(chan struct{})
 
-	c := component.NewComponent(
+	c := actors.NewActor(
 		func(ctx context.Context) error {
 			<-done
 			return nil
@@ -38,21 +38,21 @@ func TestComponentInterruption(t *testing.T) {
 
 	err = c.Interrupt(ctx)
 	if assert.Error(t, err) {
-		assert.Equal(t, component.ErrComponentIsNotRunning, err)
+		assert.Equal(t, actors.ErrActorIsNotRunning, err)
 	}
 
 	assert.Equal(t, true, c.IsInterrupted())
 
 }
 
-type myComponent struct {
-	component.Component
+type myActor struct {
+	actors.Actor
 	Finished bool
 }
 
-func NewMyComponent() *myComponent {
-	c := myComponent{}
-	c.Component = component.NewComponent(
+func NewMyActor() *myActor {
+	c := myActor{}
+	c.Actor = actors.NewActor(
 		func(ctx context.Context) error {
 			c.Finished = true
 			return nil
@@ -61,7 +61,7 @@ func NewMyComponent() *myComponent {
 	return &c
 }
 
-func TestOwnComponent(t *testing.T) {
+func TestOwnActor(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -69,7 +69,7 @@ func TestOwnComponent(t *testing.T) {
 
 	var err error
 
-	c := NewMyComponent()
+	c := NewMyActor()
 	c.Start(ctx)
 	err = c.WaitUntilHalted(ctx)
 	assert.NoError(t, err)

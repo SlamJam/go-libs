@@ -1,12 +1,21 @@
 package options
 
-type Opt[T any] func(T) T
+type Opt[T any] func(*T)
 
-func ApplyOptsInto[T any](in *T, opts ...Opt[T]) {
-	o := *in
-	for _, opt := range opts {
-		o = opt(o)
+func ApplyInto[T any](options *T, opts ...Opt[T]) {
+	if options == nil {
+		return
 	}
 
-	*in = o
+	for _, opt := range opts {
+		tmp := *options
+		opt(&tmp)
+		*options = tmp
+	}
+}
+
+func Create[T any](opts ...Opt[T]) T {
+	var options T
+	ApplyInto(&options, opts...)
+	return options
 }
