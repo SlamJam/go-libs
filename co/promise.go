@@ -20,6 +20,7 @@ type promise[T any] struct {
 	result T
 	err    error
 
+	lazy        bool
 	initialized bool
 	launched    atomic.Bool
 	comleted    atomic.Bool
@@ -42,16 +43,24 @@ func (p *promise[T]) IsCompleted() bool {
 	return p.comleted.Load()
 }
 
+func (p *promise[T]) onComplete(result T, err error) {
+	p.result = result
+	p.err = err
+	p.comleted.Store(true)
+	close(p.done)
+}
+
 func (p *promise[T]) ensureLaunched() (result bool) {
+	if p.launched.Load() {
+		return
+	}
+
 	p.onceLaunch.Do(func() {
 		p.launched.Store(true)
 		result = true
 
 		go func() {
-			defer close(p.done)
-			defer p.comleted.Store(true)
-
-			p.result, p.err = p.f()
+			p.onComplete(p.f())
 		}()
 	})
 
@@ -81,24 +90,24 @@ func (p *promise[T]) Await(ctx context.Context) (err error) {
 	return
 }
 
-func (p *promise[T]) Value() (result T) {
+func (p *promise[T]) Value() (result T, err error) {
 	if !p.IsCompleted() {
 		panic("trying to read a value that is not set")
 	}
 
-	result, _ = p.Poll(context.TODO())
-	return
+	return p.result, p.err
 }
 
-func newPromise[T any](f func() (T, error), eager bool) Promise[T] {
+func newPromise[T any](f func() (T, error), lazy bool) Promise[T] {
 	p := &promise[T]{
-		f: f,
+		f:    f,
+		lazy: lazy,
 
 		initialized: true,
 		done:        make(chan struct{}),
 	}
 
-	if eager {
+	if !p.lazy {
 		p.ensureLaunched()
 	}
 
@@ -106,23 +115,33 @@ func newPromise[T any](f func() (T, error), eager bool) Promise[T] {
 }
 
 func NewPromise[T any](f func() (T, error)) Promise[T] {
-	return newPromise(f, true)
-}
-
-func NewLazyPromise[T any](f func() (T, error)) Promise[T] {
 	return newPromise(f, false)
 }
 
+func NewLazyPromise[T any](f func() (T, error)) Promise[T] {
+	return newPromise(f, true)
+}
+
 func NewResolved[T any](result T) Promise[T] {
-	return NewPromise(func() (T, error) {
+	p := NewLazyPromise(func() (T, error) {
 		return result, nil
 	})
+
+	p.launched.Store(true)
+	p.onComplete(result, nil)
+
+	return p
 }
 
 func NewRejected[T any](err error) Promise[T] {
-	return NewPromise(func() (T, error) {
+	p := NewLazyPromise(func() (T, error) {
 		return std.Zero[T](), err
 	})
+
+	p.launched.Store(true)
+	p.onComplete(std.Zero[T](), err)
+
+	return p
 }
 
 var Resolved = NewResolved(std.Void{})
@@ -131,7 +150,7 @@ var ErrRejected = errors.New("rejected")
 
 var Rejected = NewRejected[std.Void](ErrRejected)
 
-var Never = NewPromise(func() (struct{}, error) {
-	<-context.Background().Done()
-	return struct{}{}, nil
-})
+// var Never = NewPromise(func() (struct{}, error) {
+// 	<-context.Background().Done()
+// 	return struct{}{}, nil
+// })

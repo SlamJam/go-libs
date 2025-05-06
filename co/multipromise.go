@@ -2,19 +2,19 @@ package co
 
 import (
 	"context"
-	"iter"
-	"sync"
+	"sort"
 
 	std "github.com/SlamJam/go-libs"
-	"github.com/SlamJam/go-libs/xchan"
 	"github.com/SlamJam/go-libs/xslices"
-	"go.uber.org/multierr"
+	"github.com/pkg/errors"
 )
+
+var ErrEmptyMultiPromise = errors.New("empty MultiPromise")
 
 type MultiPromise[T any] []Promise[T]
 
 func (mp *MultiPromise[T]) Add(f func() (T, error)) {
-	*mp = append(*mp, NewPromise(f))
+	mp.Append(NewPromise(f))
 }
 
 func (mp *MultiPromise[T]) Append(p Promise[T]) {
@@ -25,171 +25,72 @@ func (mp MultiPromise[T]) AsWaitables() []Awaitable {
 	return xslices.Map(mp, func(p Promise[T]) Awaitable { return p })
 }
 
+func (mp MultiPromise[T]) AsPromiseWithKeys() []PromiseWithKey[T, int] {
+	result := make([]PromiseWithKey[T, int], 0, len(mp))
+	for i, p := range mp {
+		result = append(result, PromiseWithKey[T, int]{Key: i, Promise: p})
+	}
+
+	return result
+}
+
+func (mp MultiPromise[T]) iterAllResults(ctx context.Context) Iterator[T, int] {
+	return IterAllResults(ctx, mp.AsPromiseWithKeys()...)
+}
+
+func (mp MultiPromise[T]) iterResultsUntillCancel(ctx context.Context) Iterator[T, int] {
+	return IterResultsUntilCancel(ctx, mp.AsPromiseWithKeys()...)
+}
+
 // AllResults дожидается выполнения всех задач
 // Возвращает или все результаты или все ошибки, собранные в multierr
 func (mp MultiPromise[T]) AllResults(ctx context.Context) ([]T, error) {
-	results := make([]T, 0, len(mp))
-	var err error
-	for _, item := range mp.IterAllResults(ctx) {
-		if !multierr.AppendInto(&err, item.Err) && err == nil {
-			results = append(results, item.Result)
-		} else {
-			results = nil
-		}
+	res := mp.iterAllResults(ctx).CollectAll()
+
+	if err := res.MultiErr(); err != nil {
+		return nil, err
 	}
 
-	return results, err
+	// Сохраняем порядок результатов
+	sort.Slice(res.Results, func(i, j int) bool {
+		return res.Results[i].Key < res.Results[j].Key
+	})
+
+	return res.AvailableResults(), nil
 }
 
 // AllResultsOrFirstError дожидается выполнения всех задач или первой возникшей ошибки
 // Возвращает или все результаты или первую возникшую ошибку
 func (mp MultiPromise[T]) AllResultsOrFirstError(ctx context.Context) ([]T, error) {
-	results := make([]T, 0, len(mp))
-	for _, item := range mp.IterAllResults(ctx) {
-		if err := item.Err; err != nil {
-			return nil, err
-		}
+	res := mp.iterAllResults(ctx).CollectAllResultsOrFirstError()
 
-		results = append(results, item.Result)
+	if err := res.MultiErr(); err != nil {
+		return nil, err
 	}
 
-	return results, nil
+	// Сохраняем порядок результатов
+	sort.Slice(res.Results, func(i, j int) bool {
+		return res.Results[i].Key < res.Results[j].Key
+	})
+
+	return res.AvailableResults(), nil
 }
 
-func (mp MultiPromise[T]) FirstResult(ctx context.Context) (T, error) {
-	var err error
-	for _, item := range mp.IterAllResults(ctx) {
-		if !multierr.AppendInto(&err, item.Err) {
-			return item.Result, nil
-		}
+func (mp MultiPromise[T]) FirstResult(ctx context.Context) (int, T, error) {
+	res := mp.iterAllResults(ctx).CollectAllResultsOrFirstError()
+
+	if err := res.MultiErr(); err != nil {
+		return 0, std.Zero[T](), err
 	}
 
-	return std.Zero[T](), err
-}
-
-type MultiPromiseIterResult[T any] struct {
-	Result T
-	Err    error
-}
-
-type iterIndexedResult[T any] struct {
-	Index int
-	Value MultiPromiseIterResult[T]
-}
-
-func (mp MultiPromise[T]) iterResults(
-	ctx context.Context,
-	iterFunc func(chan iterIndexedResult[T]) iter.Seq2[int, MultiPromiseIterResult[T]],
-) iter.Seq2[int, MultiPromiseIterResult[T]] {
-
-	ch := make(chan iterIndexedResult[T])
-	// Если мы вышли раньше и не дочитали до конца, нужно дрейнить каналы, пока в них кто-то пишет
-	defer xchan.Drain(ch)
-
-	var wg sync.WaitGroup
-	for idx, p := range mp {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
-			res, err := p.Poll(ctx)
-			ch <- iterIndexedResult[T]{Index: idx, Value: MultiPromiseIterResult[T]{Result: res, Err: err}}
-		}()
+	if len(res.Results) > 0 {
+		return res.Results[0].Key, res.Results[0].Value, nil
 	}
 
-	go func() {
-		defer close(ch)
-		wg.Wait()
-	}()
-
-	return iterFunc(ch)
+	return 0, std.Zero[T](), ErrEmptyMultiPromise
 }
 
-func (mp MultiPromise[T]) IterAllResults(ctx context.Context) iter.Seq2[int, MultiPromiseIterResult[T]] {
-	iterFunc := func(ch chan iterIndexedResult[T]) iter.Seq2[int, MultiPromiseIterResult[T]] {
-		return func(yield func(int, MultiPromiseIterResult[T]) bool) { // iter.Seq2[int, MultiPromiseIterResult[T]]
-			for item := range ch {
-				if !yield(item.Index, item.Value) {
-					return
-				}
-			}
-		}
-	}
-
-	return mp.iterResults(ctx, iterFunc)
-}
-
-func (mp MultiPromise[T]) IterResultsUntillCancel(ctx context.Context) iter.Seq2[int, MultiPromiseIterResult[T]] {
-	iterFunc := func(ch chan iterIndexedResult[T]) iter.Seq2[int, MultiPromiseIterResult[T]] {
-		return func(yield func(int, MultiPromiseIterResult[T]) bool) { // iter.Seq2[int, MultiPromiseIterResult[T]]
-			for {
-				select {
-				case item, ok := <-ch:
-					if !ok {
-						return
-					}
-					if !yield(item.Index, item.Value) {
-						return
-					}
-				case <-ctx.Done():
-					return
-				}
-			}
-		}
-	}
-
-	return mp.iterResults(ctx, iterFunc)
-}
-
-type IndexedResult[T any] struct {
-	Index int
-	Value T
-}
-
-type IndexedError struct {
-	Index int
-	Err   error
-}
-
-type MultiPromisePartialResult[T any] struct {
-	Results []IndexedResult[T]
-	Errors  []IndexedError
-}
-
-func (pr *MultiPromisePartialResult[T]) addError(idx int, err error) {
-	pr.Errors = append(pr.Errors, IndexedError{Index: idx, Err: err})
-}
-
-func (pr *MultiPromisePartialResult[T]) addResult(idx int, val T) {
-	pr.Results = append(pr.Results, IndexedResult[T]{Index: idx, Value: val})
-}
-
-func (pr *MultiPromisePartialResult[T]) AvailableResults() []T {
-	result := make([]T, 0, len(pr.Results))
-	for _, r := range pr.Results {
-		result = append(result, r.Value)
-	}
-
-	return result
-}
-
-func (pr *MultiPromisePartialResult[T]) MultiErr() error {
-	var result error
-	for _, err := range pr.Errors {
-		result = multierr.Append(result, err.Err)
-	}
-
-	return result
-}
-
-func (mp MultiPromise[T]) PartialResult(ctx context.Context) (result MultiPromisePartialResult[T]) {
-	for idx, item := range mp.IterAllResults(ctx) {
-		if item.Err != nil {
-			result.addError(idx, item.Err)
-		} else {
-			result.addResult(idx, item.Result)
-		}
-	}
-
-	return
+func (mp MultiPromise[T]) PartialResult(ctx context.Context) (map[int]T, map[int]error) {
+	res := mp.iterResultsUntillCancel(ctx).CollectAll()
+	return ResultsWithKeyToMap(res.Results), ErrorsWithKeyToMap(res.Errors)
 }

@@ -2,7 +2,6 @@ package co
 
 import (
 	"context"
-	"log"
 	"sync"
 	"time"
 
@@ -29,7 +28,7 @@ type NurseryResult struct {
 func (nr NurseryResult) Await(ctx context.Context) error {
 	// n.assertIsInitialized()
 
-	return nr.promises.All(ctx)
+	return nr.promises.AwaitAll(ctx)
 }
 
 func (n *Nursery) assertIsInitialized() {
@@ -259,7 +258,8 @@ func requesShard(n Nursery, addrs []string) Promise[Response] {
 	}
 
 	return Fork(n, func() (Response, error) {
-		return replicaReqs.FirstResult(n.Ctx())
+		_, resp, err := replicaReqs.FirstResult(n.Ctx())
+		return resp, err
 	})
 }
 
@@ -277,13 +277,14 @@ func requesShardWithDelay(n Nursery, addrs []string) Promise[Response] {
 			waitCtx, cancel := context.WithTimeoutCause(n.Ctx(), 50*time.Millisecond, ErrReplicaResultTimeout)
 			defer cancel()
 
-			resp, err := replicaReqs.FirstResult(waitCtx)
+			_, resp, err := replicaReqs.FirstResult(waitCtx)
 			if err == nil {
 				return resp, nil
 			}
 		}
 
-		return replicaReqs.FirstResult(n.Ctx())
+		_, resp, err := replicaReqs.FirstResult(n.Ctx())
+		return resp, err
 	})
 }
 
@@ -316,18 +317,18 @@ func xxx3() {
 		}
 
 		// Хотим все результаты
-		// return shardReqs.AllResults(n.Ctx())
+		return shardReqs.AllResults(n.Ctx())
 
 		// Зачем ждать все, если кто-то не ответил?
 		// return shardReqs.AllResultsOrFirstError(n.Ctx())
 
 		// Соберём частичный результат
-		partialResult := shardReqs.PartialResult(n.Ctx())
-		if err := partialResult.MultiErr(); err != nil {
-			log.Printf("WARN: partial result with errors: %v", err)
-		}
+		// partialResult := shardReqs.PartialResult(n.Ctx())
+		// if err := partialResult.MultiErr(); err != nil {
+		// 	log.Printf("WARN: partial result with errors: %v", err)
+		// }
 
-		return partialResult.AvailableResults(), nil
+		// return partialResult.AvailableResults(), nil
 	})
 
 	_, _ = resp, err
@@ -338,5 +339,5 @@ func xxx3() {
 
 	// Focus
 	manyNurseryResults := Awaitables{nr, nr, nr}
-	_ = manyNurseryResults.All(context.TODO())
+	_ = manyNurseryResults.AwaitAll(context.TODO())
 }

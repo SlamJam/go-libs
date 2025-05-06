@@ -13,15 +13,15 @@ type Awaitable interface {
 
 type Awaitables []Awaitable
 
-func (a Awaitables) All(ctx context.Context) error {
-	return All(ctx, a...)
+func (a Awaitables) AwaitAll(ctx context.Context) error {
+	return AwaitAll(ctx, a...)
 }
 
-func (a Awaitables) UntilFirstError(ctx context.Context) error {
-	return UntilFirstError(ctx, a...)
+func (a Awaitables) AwaitUntilFirstError(ctx context.Context) error {
+	return AwaitUntilFirstError(ctx, a...)
 }
 
-func All(ctx context.Context, ws ...Awaitable) error {
+func AwaitAll(ctx context.Context, ws ...Awaitable) error {
 	var result error
 
 	for _, w := range ws {
@@ -33,7 +33,7 @@ func All(ctx context.Context, ws ...Awaitable) error {
 	return result
 }
 
-func UntilFirstError(ctx context.Context, ws ...Awaitable) (result error) {
+func AwaitUntilFirstError(ctx context.Context, ws ...Awaitable) (result error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 

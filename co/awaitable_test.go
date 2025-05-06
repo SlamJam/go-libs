@@ -36,7 +36,7 @@ func _() {
 	// во внешнем пакете такое будет сделать нельзя
 	// All(&co.promise[int]{})
 
-	co.All(context.TODO(), co.Resolved)
+	co.AwaitAll(context.TODO(), co.Resolved)
 
 	ctx := context.Background()
 
@@ -58,16 +58,16 @@ func _() {
 		return GetRegion(ctx, prop.RegionID)
 	})
 
-	if err := co.All(context.TODO(), propetryP, roomsP, regionP); err != nil {
+	if err := co.AwaitAll(context.TODO(), propetryP, roomsP, regionP); err != nil {
 		return
 	}
 
-	prop := propetryP.Value()
+	prop, _ := propetryP.Value()
 	_ = prop.OtelloID
 
-	rooms := roomsP.Value()
+	rooms, _ := roomsP.Value()
 	_ = len(rooms)
 
-	region := regionP.Value()
+	region, _ := regionP.Value()
 	_ = region
 }
