@@ -9,7 +9,7 @@ import (
 
 type PromiseMap[K comparable, T any] map[K]Promise[T]
 
-func (pm *PromiseMap[K, T]) Add(k K, f Deffered[T]) {
+func (pm *PromiseMap[K, T]) Add(k K, f func() (T, error)) {
 	if *pm == nil {
 		*pm = PromiseMap[K, T]{}
 	}
